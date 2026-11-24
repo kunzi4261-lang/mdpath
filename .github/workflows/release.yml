@@ -1,0 +1,89 @@
+name: Publish GitHub release
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mdpath-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'kunzi4261-lang/mdpath' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      artifact_attempt: ${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Test source
+        run: python -m unittest discover -s tests -v
+      - name: Build and verify the installed wheel
+        id: package
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
+          python -m pip wheel . --no-deps --wheel-dir dist
+          python -m pip install --no-index --no-deps dist/*.whl
+          cd "$RUNNER_TEMP"
+          version="$(python -c 'from importlib.metadata import version; print(version("mdpath"))')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(mdpath --version)" = "mdpath $version"
+          mdpath "$GITHUB_WORKSPACE" --github
+          cd "$GITHUB_WORKSPACE"
+          test -f "dist/mdpath-$version-py3-none-any.whl"
+          cp "docs/releases/$version.md" dist/notes.md
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mdpath-release-${{ github.run_attempt }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mdpath-release-${{ needs.build.outputs.artifact_attempt }}
+          path: dist
+      - name: Publish the verified wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          wheel="mdpath-$VERSION-py3-none-any.whl"
+          api="repos/$GH_REPO"
+
+          # Create a missing tag once. Existing tags must point to this exact commit.
+          refs="$(gh api "$api/git/matching-refs/tags/$tag")"
+          if ! jq -e --arg ref "refs/tags/$tag" 'any(.[]; .ref == $ref)' <<< "$refs" >/dev/null; then
+            gh api --method POST "$api/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          test "$(gh api "$api/commits/$tag" --jq '.sha')" = "$GITHUB_SHA"
+
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --draft --verify-tag --target "$GITHUB_SHA" \
+              --title "mdpath $VERSION" --notes-file dist/notes.md
+          fi
+          release="$(gh release view "$tag" --json isDraft,assets)"
+          if ! jq -e --arg name "$wheel" 'any(.assets[]; .name == $name)' <<< "$release" >/dev/null; then
+            gh release upload "$tag" "dist/$wheel"
+          fi
+          gh release download "$tag" --pattern "$wheel" --dir "$RUNNER_TEMP/download"
+          cmp "dist/$wheel" "$RUNNER_TEMP/download/$wheel"
+          if jq -e '.isDraft' <<< "$release" >/dev/null; then
+            gh release edit "$tag" --draft=false
+          fi

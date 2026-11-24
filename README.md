@@ -26,14 +26,14 @@ python examples/renamed_file.py
 
 ## 安装为命令行工具
 
-在已激活的 Python 虚拟环境中，从项目根目录安装。之后就可以在其他仓库里直接运行 `mdpath`。
+在已激活的 Python 虚拟环境中，可以直接安装 [GitHub Release](https://github.com/kunzi4261-lang/mdpath/releases/tag/v0.2.0) 里的 wheel。之后就可以在其他仓库里运行 `mdpath`。
 
 ```sh
-python -m pip install .
+python -m pip install https://github.com/kunzi4261-lang/mdpath/releases/download/v0.2.0/mdpath-0.2.0-py3-none-any.whl
 mdpath ../my-notes
 ```
 
-修改工具源码时可改用 `python -m pip install -e .`。省略目录参数会检查当前目录。
+从项目源码安装可用 `python -m pip install .`，边修改边运行可用 `python -m pip install -e .`。省略目录参数会检查当前目录。
 
 ## 接入脚本与 CI
 
