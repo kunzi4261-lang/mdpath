@@ -35,3 +35,16 @@ class MarkdownLinksTest(unittest.TestCase):
     def test_code_literal_and_empty_destination(self):
         source = "`unclosed [read](ok)\n[home]()"
         self.assertEqual(list(iter_links(source)), [(1, "ok"), (2, "")])
+
+    def test_entities_require_complete_names_and_bounded_numbers(self):
+        cases = {
+            "a&notarealname;.md": "a&notarealname;.md",
+            "a&#00000065;": "a&#00000065;",
+            "a&#xD800;": "a\uFFFD",
+            "a&#x80;": "a\x80",
+            r"\&copy;": "&copy;",
+            "&#x4E66;&#49;": "书1",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(list(iter_links(f"[item]({raw})")), [(1, expected)])

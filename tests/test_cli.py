@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -6,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from mdpath import Report, check_link
+from mdpath import Report, annotation, check_link, log_line
 
 
 CLI = Path(__file__).resolve().parents[1] / "mdpath.py"
@@ -29,6 +30,7 @@ class CliTests(unittest.TestCase):
         return subprocess.run(
             [sys.executable, str(CLI), *args], cwd=self.root,
             capture_output=True, text=True, encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
 
     def report(self, code, *args):
@@ -89,6 +91,41 @@ class CliTests(unittest.TestCase):
             with self.subTest(root=root):
                 result = self.report(2, root)
                 self.assertEqual(result["errors"][0]["file"], ".")
+
+    def test_annotations_point_to_workspace_relative_source_lines(self):
+        self.write("notes/sub/a,b%25.md", "# Notes\n\n[image](gone.png)")
+        with patch.dict(os.environ, GITHUB_WORKSPACE=str(self.root)):
+            result = self.run_cli("notes", "--github")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0],
+                         "::error title=mdpath,file=notes/sub/a%2Cb%2525.md,line=3::missing: gone.png")
+
+    def test_annotation_handles_control_characters_and_property_delimiters(self):
+        result = annotation("a:\r\n%,b.md", "missing: a\r\nb,c:%25", 7)
+        self.assertEqual(result, "::error title=mdpath,file=a%3A%0D%0A%25%2Cb.md,line=7"
+                                 "::missing: a%0D%0Ab,c:%2525")
+        self.assertEqual(log_line("a\n::sample: ##[b]"), r"a\n:\x3asample: ##\[b]")
+
+    def test_read_errors_with_github_format(self):
+        (self.root / "bad.md").write_bytes(b"\xff")
+        with patch.dict(os.environ, GITHUB_WORKSPACE=str(self.root)):
+            result = self.run_cli("--github")
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue(result.stdout.startswith("::error title=mdpath,file=bad.md::"))
+
+    def test_output_modes_are_exclusive(self):
+        self.assertEqual(self.run_cli("--json", "--github").returncode, 2)
+
+    def test_redirected_output_in_legacy_encoding(self):
+        self.write("📚.md", "[note](📄.txt)")
+        command = [sys.executable, str(CLI)]
+        env = {**os.environ, "PYTHONIOENCODING": "cp932", "GITHUB_WORKSPACE": str(self.root)}
+        plain = subprocess.run(command, cwd=self.root, env=env, capture_output=True)
+        self.assertEqual(plain.returncode, 1, plain.stderr)
+        self.assertIn(r"\U0001f4da.md:1: missing: \U0001f4c4.txt", plain.stdout.decode("cp932"))
+        github = subprocess.run([*command, "--github"], cwd=self.root, env=env, capture_output=True)
+        self.assertEqual(github.returncode, 1, github.stderr)
+        self.assertIn("file=📚.md,line=1::missing: 📄.txt", github.stdout.decode("utf-8"))
 
     def test_file_symlinks_are_skipped_and_external_target_is_flagged(self):
         external = self.root.parent / "external.md"

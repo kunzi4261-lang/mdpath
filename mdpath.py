@@ -2,6 +2,7 @@
 
 import argparse
 from dataclasses import asdict, dataclass, field
+from io import TextIOWrapper
 import json
 import os
 from pathlib import Path, PureWindowsPath
@@ -12,6 +13,8 @@ from urllib.parse import unquote
 
 from mdlinks import iter_links
 
+
+__version__ = "0.2.0"
 
 IGNORED_DIRS = {
     ".git", ".hg", ".svn", ".venv", "__pycache__", "build", "dist",
@@ -122,20 +125,68 @@ def scan(root):
     return report
 
 
+def workflow_data(value):
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def annotation(file, message, line=None):
+    # GitHub's command properties have two extra delimiters beyond message data.
+    properties = "title=mdpath"
+    if file is not None:
+        properties += ",file=" + workflow_data(file).replace(":", "%3A").replace(",", "%2C")
+    if line is not None:
+        properties += f",line={line}"
+    return f"::error {properties}::{workflow_data(message)}"
+
+
+def print_annotations(root, report):
+    workspace = os.environ.get("GITHUB_WORKSPACE")
+    prefix = Path(".")
+    if workspace:
+        scan_root = Path(os.path.abspath(root))
+        workspace_root = Path(os.path.abspath(workspace))
+        prefix = (scan_root.relative_to(workspace_root)
+                  if scan_root.is_relative_to(workspace_root) else scan_root)
+    for item in report.broken:
+        file = (prefix / item["file"]).as_posix()
+        print(annotation(file, f"{item['reason']}: {item['target']}", item["line"]))
+    for item in report.errors:
+        file = None if item["file"] == "." else (prefix / item["file"]).as_posix()
+        print(annotation(file, item["message"]))
+
+
+def log_line(value):
+    # File names and decoded destinations can contain newlines or control codes.
+    result = "".join(c if c.isprintable() else ascii(c)[1:-1] for c in value)
+    return result.replace("::", r":\x3a").replace("##[", r"##\[")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"mdpath {__version__}")
     parser.add_argument("root", nargs="?", type=Path, default=Path("."),
                         help="repository directory to scan (default: current directory)")
-    parser.add_argument("--json", action="store_true", help="print a machine-readable report")
+    formats = parser.add_mutually_exclusive_group()
+    formats.add_argument("--json", action="store_true", help="print a machine-readable report")
+    formats.add_argument("--github", action="store_true", help="emit GitHub Actions annotations")
     args = parser.parse_args(argv)
+    # Workflow commands are UTF-8; local pipes may use a legacy code page.
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, TextIOWrapper):
+            stream.reconfigure(encoding="utf-8" if args.github else stream.encoding,
+                               errors="backslashreplace")
     report = scan(args.root)
     if args.json:
-        print(json.dumps(asdict(report), indent=2))
+        payload = json.dumps(asdict(report), indent=2)
+        print(payload.replace("##[", r"#\u0023["))
     else:
-        for item in report.broken:
-            print("{file}:{line}: {reason}: {target}".format(**item))
-        for item in report.errors:
-            print("{file}: error: {message}".format(**item), file=sys.stderr)
+        if args.github:
+            print_annotations(args.root, report)
+        else:
+            for item in report.broken:
+                print(log_line("{file}:{line}: {reason}: {target}".format(**item)))
+            for item in report.errors:
+                print(log_line("{file}: error: {message}".format(**item)), file=sys.stderr)
         print(f"Checked {report.files} Markdown files, {report.links} local links. "
               f"Broken: {len(report.broken)}. Errors: {len(report.errors)}.")
     if report.errors:

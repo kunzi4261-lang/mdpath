@@ -8,7 +8,7 @@ line-oriented subset excludes HTML parsing, multiline links or code spans,
 and code fences nested inside block quotes or list containers.
 """
 
-import html
+from html.entities import html5
 import re
 import string
 from typing import Iterator
@@ -17,8 +17,12 @@ from typing import Iterator
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 DEFINITION = re.compile(r"^ {0,3}\[(?:\\.|[^\[\]\\])+\]:[ \t]*")
 TITLE = re.compile(r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\((?:\\.|[^()\\])*\))""")
-ESCAPE = re.compile(r"\\([" + re.escape(string.punctuation) + r"])")
-ENTITY = re.compile(r"&(?:#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]+);")
+LINK_ESCAPE = re.compile(
+    r"\\(?P<escaped>[" + re.escape(string.punctuation) + r"])"
+    r"|&#(?P<decimal>[0-9]{1,7});"
+    r"|&#[xX](?P<hex>[0-9a-fA-F]{1,6});"
+    r"|&(?P<named>[a-zA-Z][a-zA-Z0-9]+;)"
+)
 TICKS = re.compile(r"`+")
 
 
@@ -55,6 +59,17 @@ def _destination(line, start):
     return None
 
 
+def _unescape(match):
+    if match.lastgroup == "escaped":
+        return match["escaped"]
+    if match.lastgroup == "named":
+        return html5.get(match["named"], match[0])
+    code = int(match["decimal"]) if match["decimal"] else int(match["hex"], 16)
+    if code == 0 or 0xD800 <= code <= 0xDFFF or code > 0x10FFFF:
+        return "\uFFFD"
+    return chr(code)
+
+
 def _target(line, start, *, definition=False):
     start = _spaces(line, start)
     parsed = _destination(line, start)
@@ -72,11 +87,7 @@ def _target(line, start, *, definition=False):
             return None
     elif not line.startswith(")", tail):
         return None
-    value = re.sub(
-        ESCAPE.pattern + "|" + ENTITY.pattern,
-        lambda match: match[1] if match[1] is not None else html.unescape(match[0]),
-        raw,
-    )
+    value = LINK_ESCAPE.sub(_unescape, raw)
     return value, tail if definition else tail + 1
 
 
